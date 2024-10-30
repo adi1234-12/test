@@ -1,0 +1,103 @@
+name: DEV Snowflake Deployment
+env:
+           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_URL }}
+           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_DEV_WAREHOUSE }}
+           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_DEV_USER }}
+           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_DEV_PRIV_KEY }}
+           SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_DEV_PASSCODE }}
+           ##SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_DEV_ROLE }}
+           ENVIRONMENT_DS: DEV
+           ENVIRONMENT_CM: DEV
+           ENVIRONMENT_SRC: DEV
+           ENVIRONMENT_DS_SRC: DEV
+           ENVIRONMENT_ABS: DEV
+           CHANGE_HISTORY_TABLE: AMI_BI_INGESTION_DEV.NFP_STAGING.CHANGE_HISTORY
+           DEPLOYMENT_SCRIPT_FOLDER: "Development/"
+ 
+on: 
+ pull_request: 
+  branches: [ Development ] 
+  types: [ closed ]
+
+jobs:
+  ExecuteBuild:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v1
+        
+      - name: Install Python 
+        uses: actions/setup-python@v2
+        with:
+               python-version: 3.8 #install the python needed
+               
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r https://raw.githubusercontent.com/snowflakedb/snowflake-connector-python/v2.4.4/tested_requirements/requirements_36.reqs
+          pip install snowflake-connector-python==2.4.4
+                    	
+      - name: Set env 	
+        id: envid 	
+        run: | 	
+            if [ "${{ env.ENVIRONMENT_DS }}" == "PROD" ] 	
+            then 	
+                 echo "::set-output name=env_ds::''" 	
+                 echo "::set-output name=env_cm::''"  
+                 echo "::set-output name=env_abs::''"
+            else 	
+               echo "the value is non-empty" 	
+               echo "::set-output name=env_table_value::${{ env.ENVIRONMENT_DS }}" 	
+               echo "::set-output name=env_ds::_${{ env.ENVIRONMENT_DS }}" 
+               echo "::set-output name=env_cm::_${{ env.ENVIRONMENT_CM }}" 
+               echo "::set-output name=env_abs::_${{ env.ENVIRONMENT_ABS }}" 
+            fi 	
+          
+      - name: Extract GIT Details
+        id: git_details
+        run: |
+           merge_commit=`git log | head -n 1 | cut -d " " -f2`
+           echo ::set-output name=merge_commit::$(git log | head -n 1 | cut -d " " -f2 )
+           echo ::set-output name=previous_commit::$(git rev-list --parents -n 1 ${merge_commit} | cut -d ' ' -f2 )
+           echo ::set-output name=comments::$(git log --pretty=format:"%s" | head -n1)
+           echo "::set-output name=branch_name::$(echo ${GITHUB_REF#refs/heads/})"
+           
+      - name: Modified Files
+        id: files
+        run: |
+            git diff-tree -r --no-commit-id --name-only --diff-filter=ACMRT ${{ steps.git_details.outputs.previous_commit }} ${{ steps.git_details.outputs.merge_commit }} | sed 's/:/\t/g' | cut -f 2 | grep $DEPLOYMENT_SCRIPT_FOLDER | sort -n > changed_file_list.txt
+            cat changed_file_list.txt
+            
+      #- name: Clone Database
+       # id: CloneID
+        #run: |        
+         #     python3 ./PythonCicdScripts/rollback_clone_db.py
+          
+        
+      - name: Get Deployment Version & Format Files
+        id: format
+        run: |
+          mkdir deployment_scripts
+          version=$(python3 ./PythonCicdScripts/cicd_get_version.py)
+          echo "Version of deployment is ${version} "
+          i=1
+          while read FILE; 
+          do 
+            wc_file_list=$(cat changed_file_list.txt | wc -l)
+            if [[ ${FILE} == *.sql ]]; 
+            then
+                 file_name=`echo ${FILE} | sed 's|.*/||'`
+                 cp ${FILE} ./deployment_scripts/V${version}.${i}__${file_name}
+                 #echo cp ${FILE} ./deployment_scripts/V${version}.${i}__${file_name}
+                 i=$(( ${i} + 1 ))
+            fi
+          done < changed_file_list.txt
+          ls  ./deployment_scripts
+          
+      - name: Execute Python Deployment Script
+        run: |
+              python3 ./PythonCicdScripts/cicd_snowpydeploy_keyPairAuth.py -f ./deployment_scripts/ -a "${SNOWFLAKE_ACCOUNT}" -u ${SNOWFLAKE_USER} --private-key "${SNOWFLAKE_PRIVATE_KEY}" -pkeypass ${SNOWFLAKE_PRIVATE_KEY_PASSPHRASE} --snowflake-warehouse ${SNOWFLAKE_WAREHOUSE} --autocommit --change-history-table ${CHANGE_HISTORY_TABLE} --environment '${{ steps.envid.outputs.env_table_value }}' --git-repository ${{ github.repository }} --git-branch ${{ steps.git_details.outputs.branch_name }} --git-commit ${{ steps.git_details.outputs.merge_commit }} --release-comments '${{ steps.git_details.outputs.comments }}' --vars '{"environment_ds": "'${{ steps.envid.outputs.env_ds }}'","environment_cm":"'${{ steps.envid.outputs.env_cm }}'","environment_src":"'_${ENVIRONMENT_SRC}'","environment_ds_src":"'_${ENVIRONMENT_DS_SRC}'","environment_abs":"'${{ steps.envid.outputs.env_abs }}'"}'
+
+
+
